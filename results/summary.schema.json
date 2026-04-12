@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jaydenpiao/parameter-golf/results/summary.schema.json",
+  "title": "Parameter Golf Run Summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "track",
+    "seed",
+    "train_seconds",
+    "eval_seconds",
+    "artifact_bytes",
+    "code_bytes",
+    "model_bytes",
+    "pre_quant_bpb",
+    "post_quant_bpb",
+    "config_name",
+    "git_sha"
+  ],
+  "properties": {
+    "track": {
+      "type": "string",
+      "enum": [
+        "track_a",
+        "track_b"
+      ]
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "train_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "eval_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "artifact_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "code_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "model_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "pre_quant_bpb": {
+      "type": "number"
+    },
+    "post_quant_bpb": {
+      "type": "number"
+    },
+    "config_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "repro_command": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

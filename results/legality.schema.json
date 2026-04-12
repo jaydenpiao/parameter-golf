@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jaydenpiao/parameter-golf/results/legality.schema.json",
+  "title": "Issue 1017 Legality Checklist",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "track",
+    "reviewer",
+    "reviewed_at",
+    "condition_1",
+    "condition_2",
+    "condition_3",
+    "condition_4",
+    "no_prequant_ttt_on_val",
+    "no_rescoring"
+  ],
+  "properties": {
+    "track": {
+      "type": "string",
+      "enum": [
+        "track_a",
+        "track_b"
+      ]
+    },
+    "reviewer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewed_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "condition_1": {
+      "$ref": "#/$defs/check"
+    },
+    "condition_2": {
+      "$ref": "#/$defs/check"
+    },
+    "condition_3": {
+      "$ref": "#/$defs/check"
+    },
+    "condition_4": {
+      "$ref": "#/$defs/check"
+    },
+    "no_prequant_ttt_on_val": {
+      "$ref": "#/$defs/check"
+    },
+    "no_rescoring": {
+      "$ref": "#/$defs/check"
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "evidence"
+      ],
+      "properties": {
+        "status": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
