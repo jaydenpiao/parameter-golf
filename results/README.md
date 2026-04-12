@@ -14,6 +14,9 @@ results/<run-id>/
 promotion decisions, and PR preparation. The schema lives in
 `results/summary.schema.json`.
 
+Runs should record both `git_sha` and `git_dirty`. A SHA without dirty-state
+information is not enough to reproduce a run from an uncommitted worktree.
+
 Every run that might influence strategy should also carry a manual legality review:
 
 ```text

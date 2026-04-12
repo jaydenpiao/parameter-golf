@@ -61,6 +61,16 @@ def current_git_sha(repo_root: Path) -> str:
     )
 
 
+def current_git_dirty(repo_root: Path) -> bool:
+    return bool(
+        subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            text=True,
+        ).strip()
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Parse a run log into results/<run-id>/summary.json")
     parser.add_argument("--config", required=True, type=Path)
@@ -151,6 +161,7 @@ def main() -> int:
         "post_quant_bpb": post_quant_bpb,
         "config_name": env.get("CONFIG_NAME", args.config.stem),
         "git_sha": current_git_sha(repo_root),
+        "git_dirty": current_git_dirty(repo_root),
         "repro_command": repro_command,
     }
 
