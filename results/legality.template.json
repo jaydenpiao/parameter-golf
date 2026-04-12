@@ -1,0 +1,30 @@
+{
+  "track": "track_b",
+  "reviewer": "your-name",
+  "reviewed_at": "2026-04-12",
+  "notes": "Fill in concrete evidence from the exact source and run under review.",
+  "condition_1": {
+    "status": false,
+    "evidence": "Explain why the predictive state at t depends only on the strict prefix."
+  },
+  "condition_2": {
+    "status": false,
+    "evidence": "Explain where the code defines a full normalized distribution over the fixed vocab."
+  },
+  "condition_3": {
+    "status": false,
+    "evidence": "Explain where scoring happens before any update that uses the scored tokens."
+  },
+  "condition_4": {
+    "status": false,
+    "evidence": "Explain why evaluation is a single left-to-right pass with no rescoring."
+  },
+  "no_prequant_ttt_on_val": {
+    "status": false,
+    "evidence": "State where quantization/Hessian/other calibration consumes only training-time data."
+  },
+  "no_rescoring": {
+    "status": false,
+    "evidence": "State why the run does not choose among multiple executions based on observed outcomes."
+  }
+}
