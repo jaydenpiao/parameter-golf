@@ -23,5 +23,15 @@ set +a
 torchrun --standalone --nproc_per_node=1 train_gpt.py
 ```
 
+Validate that the config and source agree before launching a run:
+
+```bash
+python3 scripts/check_config_support.py --config configs/baseline_sp1024_1xh100.env --source train_gpt.py
+```
+
+Configs that reference feature flags the source does not consume should fail fast.
+This avoids mislabeled runs where metadata says `track_b` but the underlying code
+ignored the requested evaluation or adaptation knobs.
+
 Do not treat shell history as configuration. If a parameter matters, it belongs
 in the config file.

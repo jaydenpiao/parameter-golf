@@ -13,6 +13,10 @@ TRAIN_SCRIPT="${2:-train_gpt.py}"
 
 load_config "${CONFIG_PATH}"
 
+python3 "${SCRIPT_DIR}/check_config_support.py" \
+  --config "${CONFIG_PATH}" \
+  --source "${REPO_ROOT}/${TRAIN_SCRIPT}"
+
 if ! command -v torchrun >/dev/null 2>&1; then
   echo "torchrun not found in PATH" >&2
   exit 1
