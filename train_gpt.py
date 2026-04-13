@@ -49,6 +49,10 @@ class Hyperparameters:
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
+    # Sliding-window eval scores only the last `eval_stride` tokens from each window.
+    # Set EVAL_STRIDE=0 to disable it and keep the baseline evaluation path only.
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 0))
+    eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", os.environ.get("SW_EVAL_BATCH", 32)))
 
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
@@ -275,6 +279,83 @@ def eval_val(
     bits_per_token = val_loss.item() / math.log(2.0)
     tokens_per_byte = val_token_count.item() / val_byte_count.item()
     model.train()
+    return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+
+
+def eval_val_sliding_window(
+    args: Hyperparameters,
+    base_model: nn.Module,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+) -> tuple[float, float]:
+    # Score only the last `eval_stride` positions in each window, so every scored token
+    # has (train_seq_len - eval_stride) tokens of left context.
+    stride = args.eval_stride
+    if stride <= 0:
+        raise ValueError(f"EVAL_STRIDE must be positive for sliding eval, got {stride}")
+    if stride > args.train_seq_len:
+        raise ValueError(
+            f"EVAL_STRIDE must be <= TRAIN_SEQ_LEN, got EVAL_STRIDE={stride} TRAIN_SEQ_LEN={args.train_seq_len}"
+        )
+    if args.eval_batch_seqs <= 0:
+        raise ValueError(f"EVAL_BATCH_SEQS must be positive, got {args.eval_batch_seqs}")
+
+    seq_len = args.train_seq_len
+    total_tokens = val_tokens.numel() - 1
+    num_windows = max((total_tokens - seq_len) // stride + 1, 1)
+    win_start = (num_windows * rank) // world_size
+    win_end = (num_windows * (rank + 1)) // world_size
+
+    val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    val_token_count = torch.zeros((), device=device, dtype=torch.float64)
+    val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
+
+    base_model.eval()
+    with torch.inference_mode():
+        window_ids = list(range(win_start, win_end))
+        for batch_start in range(0, len(window_ids), args.eval_batch_seqs):
+            batch_wins = window_ids[batch_start : batch_start + args.eval_batch_seqs]
+            inputs = torch.stack(
+                [val_tokens[w * stride : w * stride + seq_len] for w in batch_wins]
+            ).to(device=device, dtype=torch.int64, non_blocking=True)
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                logits = base_model.forward_logits(inputs)
+
+            scored_logits = logits[:, -stride:, :].reshape(-1, logits.size(-1))
+            targets = torch.stack(
+                [
+                    val_tokens[w * stride + seq_len - stride + 1 : w * stride + seq_len + 1]
+                    for w in batch_wins
+                ]
+            ).to(device=device, dtype=torch.int64, non_blocking=True).reshape(-1)
+
+            loss = F.cross_entropy(scored_logits.float(), targets, reduction="sum")
+            val_loss_sum += loss.to(torch.float64)
+            val_token_count += float(targets.numel())
+
+            prev_ids = torch.stack(
+                [val_tokens[w * stride + seq_len - stride : w * stride + seq_len] for w in batch_wins]
+            ).to(device=device, dtype=torch.int64, non_blocking=True).reshape(-1)
+
+            token_bytes = base_bytes_lut[targets].to(dtype=torch.int16)
+            token_bytes += (has_leading_space_lut[targets] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
+            val_byte_count += token_bytes.to(torch.float64).sum()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_token_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_byte_count, op=dist.ReduceOp.SUM)
+
+    val_loss = val_loss_sum / val_token_count
+    bits_per_token = val_loss.item() / math.log(2.0)
+    tokens_per_byte = val_token_count.item() / val_byte_count.item()
+    base_model.train()
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
 
 # -----------------------------
@@ -723,6 +804,29 @@ class GPT(nn.Module):
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
         return F.cross_entropy(logits.float(), targets, reduction="mean")
 
+    def forward_logits(self, input_ids: Tensor) -> Tensor:
+        x = self.tok_emb(input_ids)
+        x = F.rms_norm(x, (x.size(-1),))
+        x0 = x
+        skips: list[Tensor] = []
+
+        for i in range(self.num_encoder_layers):
+            x = self.blocks[i](x, x0)
+            skips.append(x)
+        for i in range(self.num_decoder_layers):
+            if skips:
+                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+            x = self.blocks[self.num_encoder_layers + i](x, x0)
+
+        x = self.final_norm(x)
+        if self.tie_embeddings:
+            logits_proj = F.linear(x, self.tok_emb.weight.to(x.dtype))
+        else:
+            if self.lm_head is None:
+                raise RuntimeError("lm_head is required when tie_embeddings=False")
+            logits_proj = self.lm_head(x)
+        return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+
 
 # -----------------------------
 # TRAINING
@@ -902,6 +1006,10 @@ def main() -> None:
         f"head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} "
         f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr}"
     )
+    if args.eval_stride > 0:
+        log0(
+            f"sliding_eval:enabled stride:{args.eval_stride} eval_batch_seqs:{args.eval_batch_seqs}"
+        )
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
@@ -1117,6 +1225,31 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
     log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+
+    if args.eval_stride > 0:
+        torch.cuda.synchronize()
+        t_sw = time.perf_counter()
+        sw_val_loss, sw_val_bpb = eval_val_sliding_window(
+            args,
+            base_model,
+            rank,
+            world_size,
+            device,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+        )
+        torch.cuda.synchronize()
+        log0(
+            f"final_sliding_window_eval stride:{args.eval_stride} "
+            f"val_loss:{sw_val_loss:.4f} val_bpb:{sw_val_bpb:.4f} "
+            f"eval_time:{1000.0 * (time.perf_counter() - t_sw):.0f}ms"
+        )
+        log0(
+            f"final_sliding_window_eval_exact stride:{args.eval_stride} "
+            f"val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}"
+        )
 
     if distributed:
         dist.destroy_process_group()
