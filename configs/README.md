@@ -33,5 +33,11 @@ Configs that reference feature flags the source does not consume should fail fas
 This avoids mislabeled runs where metadata says `track_b` but the underlying code
 ignored the requested evaluation or adaptation knobs.
 
+Current evaluation knobs consumed by `train_gpt.py` include:
+
+- `EVAL_STRIDE` / `EVAL_BATCH_SEQS` for sliding-window scoring
+- `TTT_ENABLED`, `TTT_LR`, `TTT_EPOCHS`, and `TTT_CHUNK_TOKENS` for the narrow
+  score-first TTT proof lane
+
 Do not treat shell history as configuration. If a parameter matters, it belongs
 in the config file.

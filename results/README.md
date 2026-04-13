@@ -19,6 +19,8 @@ When a run enables an alternate evaluation mode such as sliding-window eval,
 `post_quant_bpb` and `eval_seconds` should reflect the configured canonical mode.
 Preserve the standard roundtrip metrics in separate fields such as
 `standard_post_quant_bpb` and `standard_eval_seconds` so comparisons stay explicit.
+Score-first TTT runs should keep both the standard roundtrip and sliding metrics in
+separate fields while making the TTT result canonical.
 
 Binary runtime artifacts from CUDA runs should live under
 `results/<run-id>/artifacts/`, not in repo root, so a clean checkout stays clean

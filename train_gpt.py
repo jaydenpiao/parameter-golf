@@ -54,6 +54,10 @@ class Hyperparameters:
     # Set EVAL_STRIDE=0 to disable it and keep the baseline evaluation path only.
     eval_stride = int(os.environ.get("EVAL_STRIDE", 0))
     eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", os.environ.get("SW_EVAL_BATCH", 32)))
+    ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "0")))
+    ttt_lr = float(os.environ.get("TTT_LR", 0.005))
+    ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
+    ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 32_768))
 
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
@@ -171,6 +175,11 @@ class Muon(torch.optim.Optimizer):
                 curr += p.numel()
 
         return loss
+
+
+TTT_MOMENTUM = 0.9
+TTT_GRAD_CLIP = 1.0
+TTT_BATCH_SEQS = 32
 
 
 # -----------------------------
@@ -358,6 +367,165 @@ def eval_val_sliding_window(
     tokens_per_byte = val_token_count.item() / val_byte_count.item()
     base_model.train()
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+
+
+def compute_bpb_from_sums(val_loss_sum: Tensor, val_token_count: Tensor, val_byte_count: Tensor) -> tuple[float, float]:
+    if val_token_count.item() <= 0:
+        raise ValueError("validation token count must be positive")
+    if val_byte_count.item() <= 0:
+        raise ValueError("validation byte count must be positive")
+    val_loss = val_loss_sum / val_token_count
+    bits_per_token = val_loss.item() / math.log(2.0)
+    tokens_per_byte = val_token_count.item() / val_byte_count.item()
+    return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+
+
+def score_token_slice_sliding_window(
+    args: Hyperparameters,
+    base_model: nn.Module,
+    device: torch.device,
+    token_slice: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    stride = args.eval_stride
+    if stride <= 0:
+        raise ValueError(f"EVAL_STRIDE must be positive for score-first TTT, got {stride}")
+    if token_slice.numel() - 1 < args.train_seq_len:
+        raise ValueError(
+            f"TTT chunk is too short for TRAIN_SEQ_LEN={args.train_seq_len}: {token_slice.numel() - 1} tokens"
+        )
+
+    seq_len = args.train_seq_len
+    total_tokens = token_slice.numel() - 1
+    num_windows = max((total_tokens - seq_len) // stride + 1, 1)
+
+    val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    val_token_count = torch.zeros((), device=device, dtype=torch.float64)
+    val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
+
+    base_model.eval()
+    with torch.inference_mode():
+        for batch_start in range(0, num_windows, args.eval_batch_seqs):
+            batch_ids = range(batch_start, min(batch_start + args.eval_batch_seqs, num_windows))
+            inputs = torch.stack(
+                [token_slice[w * stride : w * stride + seq_len] for w in batch_ids]
+            ).to(device=device, dtype=torch.int64, non_blocking=True)
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                logits = base_model.forward_logits(inputs)
+
+            scored_logits = logits[:, -stride:, :].reshape(-1, logits.size(-1))
+            targets = torch.stack(
+                [
+                    token_slice[w * stride + seq_len - stride + 1 : w * stride + seq_len + 1]
+                    for w in batch_ids
+                ]
+            ).to(device=device, dtype=torch.int64, non_blocking=True).reshape(-1)
+
+            loss = F.cross_entropy(scored_logits.float(), targets, reduction="sum")
+            val_loss_sum += loss.to(torch.float64)
+            val_token_count += float(targets.numel())
+
+            prev_ids = torch.stack(
+                [token_slice[w * stride + seq_len - stride : w * stride + seq_len] for w in batch_ids]
+            ).to(device=device, dtype=torch.int64, non_blocking=True).reshape(-1)
+
+            token_bytes = base_bytes_lut[targets].to(dtype=torch.int16)
+            token_bytes += (has_leading_space_lut[targets] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
+            val_byte_count += token_bytes.to(torch.float64).sum()
+
+    return val_loss_sum, val_token_count, val_byte_count
+
+
+def build_ttt_chunk_ranges(total_tokens: int, chunk_tokens: int, min_chunk_tokens: int) -> list[tuple[int, int]]:
+    if chunk_tokens <= 0:
+        raise ValueError(f"TTT_CHUNK_TOKENS must be positive, got {chunk_tokens}")
+    if chunk_tokens < min_chunk_tokens:
+        raise ValueError(
+            f"TTT_CHUNK_TOKENS must be at least TRAIN_SEQ_LEN, got TTT_CHUNK_TOKENS={chunk_tokens} "
+            f"TRAIN_SEQ_LEN={min_chunk_tokens}"
+        )
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    while start < total_tokens:
+        end = min(start + chunk_tokens, total_tokens)
+        if total_tokens - end < min_chunk_tokens:
+            end = total_tokens
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def adapt_model_on_token_slice(
+    args: Hyperparameters,
+    base_model: nn.Module,
+    device: torch.device,
+    token_slice: Tensor,
+    optimizer: torch.optim.Optimizer,
+) -> None:
+    usable_tokens = ((token_slice.numel() - 1) // args.train_seq_len) * args.train_seq_len
+    if usable_tokens < args.train_seq_len:
+        return
+
+    local = token_slice[: usable_tokens + 1].to(device=device, dtype=torch.int64, non_blocking=True)
+    x = local[:-1].reshape(-1, args.train_seq_len)
+    y = local[1:].reshape(-1, args.train_seq_len)
+
+    base_model.train()
+    for _ in range(args.ttt_epochs):
+        for batch_start in range(0, x.size(0), TTT_BATCH_SEQS):
+            xb = x[batch_start : batch_start + TTT_BATCH_SEQS]
+            yb = y[batch_start : batch_start + TTT_BATCH_SEQS]
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                loss = base_model(xb, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(base_model.parameters(), TTT_GRAD_CLIP)
+            optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+
+def eval_val_score_first_ttt(
+    args: Hyperparameters,
+    base_model: nn.Module,
+    device: torch.device,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+) -> tuple[float, float]:
+    if not args.ttt_enabled:
+        raise ValueError("score-first TTT requested with TTT disabled")
+
+    total_tokens = val_tokens.numel() - 1
+    chunk_ranges = build_ttt_chunk_ranges(total_tokens, args.ttt_chunk_tokens, args.train_seq_len)
+    ttt_optimizer = torch.optim.SGD(base_model.parameters(), lr=args.ttt_lr, momentum=TTT_MOMENTUM)
+
+    total_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    total_token_count = torch.zeros((), device=device, dtype=torch.float64)
+    total_byte_count = torch.zeros((), device=device, dtype=torch.float64)
+
+    for chunk_idx, (start, end) in enumerate(chunk_ranges):
+        chunk_tokens = val_tokens[start : end + 1]
+        chunk_loss_sum, chunk_token_count, chunk_byte_count = score_token_slice_sliding_window(
+            args,
+            base_model,
+            device,
+            chunk_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+        )
+        total_loss_sum += chunk_loss_sum
+        total_token_count += chunk_token_count
+        total_byte_count += chunk_byte_count
+
+        if chunk_idx != len(chunk_ranges) - 1:
+            adapt_model_on_token_slice(args, base_model, device, chunk_tokens, ttt_optimizer)
+
+    return compute_bpb_from_sums(total_loss_sum, total_token_count, total_byte_count)
 
 # -----------------------------
 # POST-TRAINING QUANTIZATION
@@ -856,6 +1024,10 @@ def main() -> None:
         raise ValueError(f"WORLD_SIZE must be positive, got {world_size}")
     if 8 % world_size != 0:
         raise ValueError(f"WORLD_SIZE={world_size} must divide 8 so grad_accum_steps stays integral")
+    if args.ttt_enabled and world_size != 1:
+        raise ValueError(f"TTT proof lane requires WORLD_SIZE=1, got WORLD_SIZE={world_size}")
+    if args.ttt_enabled and args.eval_stride <= 0:
+        raise ValueError("TTT proof lane requires EVAL_STRIDE > 0")
     grad_accum_steps = 8 // world_size
     grad_scale = 1.0 / grad_accum_steps
     if not torch.cuda.is_available():
@@ -1014,6 +1186,11 @@ def main() -> None:
     if args.eval_stride > 0:
         log0(
             f"sliding_eval:enabled stride:{args.eval_stride} eval_batch_seqs:{args.eval_batch_seqs}"
+        )
+    if args.ttt_enabled:
+        log0(
+            f"ttt_eval:enabled chunk_tokens:{args.ttt_chunk_tokens} epochs:{args.ttt_epochs} "
+            f"lr:{args.ttt_lr} batch_seqs:{TTT_BATCH_SEQS} momentum:{TTT_MOMENTUM} grad_clip:{TTT_GRAD_CLIP}"
         )
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
@@ -1256,6 +1433,29 @@ def main() -> None:
         log0(
             f"final_sliding_window_eval_exact stride:{args.eval_stride} "
             f"val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}"
+        )
+
+    if args.ttt_enabled:
+        torch.cuda.synchronize()
+        t_ttt = time.perf_counter()
+        ttt_val_loss, ttt_val_bpb = eval_val_score_first_ttt(
+            args,
+            base_model,
+            device,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+        )
+        torch.cuda.synchronize()
+        log0(
+            f"final_ttt_eval chunk_tokens:{args.ttt_chunk_tokens} epochs:{args.ttt_epochs} "
+            f"lr:{args.ttt_lr:.6f} val_loss:{ttt_val_loss:.4f} val_bpb:{ttt_val_bpb:.4f} "
+            f"eval_time:{1000.0 * (time.perf_counter() - t_ttt):.0f}ms"
+        )
+        log0(
+            f"final_ttt_eval_exact chunk_tokens:{args.ttt_chunk_tokens} epochs:{args.ttt_epochs} "
+            f"lr:{args.ttt_lr:.6f} val_loss:{ttt_val_loss:.8f} val_bpb:{ttt_val_bpb:.8f}"
         )
 
     if distributed:
