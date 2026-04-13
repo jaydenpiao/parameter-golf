@@ -11,8 +11,11 @@ from pathlib import Path
 
 
 STEP_VAL_RE = re.compile(r"^step:\d+/\d+ val_loss:[0-9.]+ val_bpb:([0-9.]+) train_time:(\d+)ms")
-FINAL_RE = re.compile(
+STANDARD_FINAL_RE = re.compile(
     r"^final_int8_zlib_roundtrip(?:_exact)? val_loss:[0-9.]+ val_bpb:([0-9.]+)(?: eval_time:(\d+)ms)?$"
+)
+SLIDING_FINAL_RE = re.compile(
+    r"^final_sliding_window_eval(?:_exact)? stride:(\d+) val_loss:[0-9.]+ val_bpb:([0-9.]+)(?: eval_time:(\d+)ms)?$"
 )
 MODEL_BYTES_RE = re.compile(r"^(?:Serialized model int8\+zlib|serialized_model_int8_zlib):\s*(\d+)\s*bytes")
 CODE_BYTES_RE = re.compile(r"^Code size:\s*(\d+)\s*bytes$")
@@ -44,6 +47,7 @@ def validate_summary(summary: dict[str, object]) -> None:
         "model_bytes": int,
         "pre_quant_bpb": (int, float),
         "post_quant_bpb": (int, float),
+        "eval_mode": str,
         "config_name": str,
         "git_sha": str,
     }
@@ -88,8 +92,11 @@ def main() -> int:
 
     pre_quant_bpb: float | None = None
     train_ms: int | None = None
-    post_quant_bpb: float | None = None
-    eval_ms: int | None = None
+    standard_post_quant_bpb: float | None = None
+    standard_eval_ms: int | None = None
+    sliding_post_quant_bpb: float | None = None
+    sliding_eval_ms: int | None = None
+    sliding_stride: int | None = None
     model_bytes: int | None = None
     code_bytes: int | None = None
     artifact_bytes: int | None = None
@@ -101,11 +108,19 @@ def main() -> int:
             train_ms = int(step_match.group(2))
             continue
 
-        final_match = FINAL_RE.match(line)
-        if final_match:
-            post_quant_bpb = float(final_match.group(1))
-            if final_match.group(2):
-                eval_ms = int(final_match.group(2))
+        standard_match = STANDARD_FINAL_RE.match(line)
+        if standard_match:
+            standard_post_quant_bpb = float(standard_match.group(1))
+            if standard_match.group(2):
+                standard_eval_ms = int(standard_match.group(2))
+            continue
+
+        sliding_match = SLIDING_FINAL_RE.match(line)
+        if sliding_match:
+            sliding_stride = int(sliding_match.group(1))
+            sliding_post_quant_bpb = float(sliding_match.group(2))
+            if sliding_match.group(3):
+                sliding_eval_ms = int(sliding_match.group(3))
             continue
 
         if model_bytes is None:
@@ -133,8 +148,6 @@ def main() -> int:
 
     if pre_quant_bpb is None:
         raise ValueError("could not parse pre-quant val_bpb from log")
-    if post_quant_bpb is None:
-        raise ValueError("could not parse final post-quant val_bpb from log")
     if train_ms is None:
         raise ValueError("could not parse train_time from log")
     if model_bytes is None:
@@ -143,8 +156,19 @@ def main() -> int:
         code_bytes = args.source.stat().st_size
     if artifact_bytes is None:
         artifact_bytes = model_bytes + code_bytes
-    if eval_ms is None:
-        eval_ms = 0
+    requested_eval_stride = int(env.get("EVAL_STRIDE", "0"))
+    if requested_eval_stride > 0:
+        if sliding_post_quant_bpb is None:
+            raise ValueError("config requested sliding eval but no final_sliding_window_eval metric was found")
+        eval_mode = "sliding_window"
+        post_quant_bpb = sliding_post_quant_bpb
+        eval_ms = sliding_eval_ms or 0
+    else:
+        if standard_post_quant_bpb is None:
+            raise ValueError("could not parse final standard post-quant val_bpb from log")
+        eval_mode = "standard_roundtrip"
+        post_quant_bpb = standard_post_quant_bpb
+        eval_ms = standard_eval_ms or 0
 
     command_path = out_path.parent / "command.sh"
     repro_command = command_path.read_text().strip() if command_path.exists() else ""
@@ -159,11 +183,23 @@ def main() -> int:
         "model_bytes": model_bytes,
         "pre_quant_bpb": pre_quant_bpb,
         "post_quant_bpb": post_quant_bpb,
+        "eval_mode": eval_mode,
+        "eval_stride": requested_eval_stride,
         "config_name": env.get("CONFIG_NAME", args.config.stem),
         "git_sha": current_git_sha(repo_root),
         "git_dirty": current_git_dirty(repo_root),
         "repro_command": repro_command,
     }
+    if standard_post_quant_bpb is not None:
+        summary["standard_post_quant_bpb"] = standard_post_quant_bpb
+    if standard_eval_ms is not None:
+        summary["standard_eval_seconds"] = round(standard_eval_ms / 1000.0, 3)
+    if sliding_post_quant_bpb is not None:
+        summary["sliding_post_quant_bpb"] = sliding_post_quant_bpb
+    if sliding_eval_ms is not None:
+        summary["sliding_eval_seconds"] = round(sliding_eval_ms / 1000.0, 3)
+    if sliding_stride is not None:
+        summary["sliding_stride"] = sliding_stride
 
     validate_summary(summary)
     out_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

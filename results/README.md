@@ -14,6 +14,11 @@ results/<run-id>/
 promotion decisions, and PR preparation. The schema lives in
 `results/summary.schema.json`.
 
+When a run enables an alternate evaluation mode such as sliding-window eval,
+`post_quant_bpb` and `eval_seconds` should reflect the configured canonical mode.
+Preserve the standard roundtrip metrics in separate fields such as
+`standard_post_quant_bpb` and `standard_eval_seconds` so comparisons stay explicit.
+
 Runs should record both `git_sha` and `git_dirty`. A SHA without dirty-state
 information is not enough to reproduce a run from an uncommitted worktree.
 

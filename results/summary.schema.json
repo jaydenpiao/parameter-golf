@@ -14,6 +14,7 @@
     "model_bytes",
     "pre_quant_bpb",
     "post_quant_bpb",
+    "eval_mode",
     "config_name",
     "git_sha"
   ],
@@ -53,6 +54,35 @@
     },
     "post_quant_bpb": {
       "type": "number"
+    },
+    "eval_mode": {
+      "type": "string",
+      "enum": [
+        "standard_roundtrip",
+        "sliding_window"
+      ]
+    },
+    "eval_stride": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "standard_post_quant_bpb": {
+      "type": "number"
+    },
+    "standard_eval_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "sliding_post_quant_bpb": {
+      "type": "number"
+    },
+    "sliding_eval_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "sliding_stride": {
+      "type": "integer",
+      "minimum": 1
     },
     "config_name": {
       "type": "string",
