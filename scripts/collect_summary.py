@@ -17,6 +17,10 @@ STANDARD_FINAL_RE = re.compile(
 SLIDING_FINAL_RE = re.compile(
     r"^final_sliding_window_eval(?:_exact)? stride:(\d+) val_loss:[0-9.]+ val_bpb:([0-9.]+)(?: eval_time:(\d+)ms)?$"
 )
+TTT_FINAL_RE = re.compile(
+    r"^final_ttt_eval(?:_exact)? chunk_tokens:(\d+) epochs:(\d+) lr:([0-9.]+) "
+    r"val_loss:[0-9.]+ val_bpb:([0-9.]+)(?: eval_time:(\d+)ms)?$"
+)
 MODEL_BYTES_RE = re.compile(r"^(?:Serialized model int8\+zlib|serialized_model_int8_zlib):\s*(\d+)\s*bytes")
 CODE_BYTES_RE = re.compile(r"^Code size:\s*(\d+)\s*bytes$")
 ARTIFACT_BYTES_RE = re.compile(r"^Total submission size int8\+zlib:\s*(\d+)\s*bytes$")
@@ -97,6 +101,11 @@ def main() -> int:
     sliding_post_quant_bpb: float | None = None
     sliding_eval_ms: int | None = None
     sliding_stride: int | None = None
+    ttt_post_quant_bpb: float | None = None
+    ttt_eval_ms: int | None = None
+    ttt_chunk_tokens: int | None = None
+    ttt_epochs: int | None = None
+    ttt_lr: float | None = None
     model_bytes: int | None = None
     code_bytes: int | None = None
     artifact_bytes: int | None = None
@@ -121,6 +130,16 @@ def main() -> int:
             sliding_post_quant_bpb = float(sliding_match.group(2))
             if sliding_match.group(3):
                 sliding_eval_ms = int(sliding_match.group(3))
+            continue
+
+        ttt_match = TTT_FINAL_RE.match(line)
+        if ttt_match:
+            ttt_chunk_tokens = int(ttt_match.group(1))
+            ttt_epochs = int(ttt_match.group(2))
+            ttt_lr = float(ttt_match.group(3))
+            ttt_post_quant_bpb = float(ttt_match.group(4))
+            if ttt_match.group(5):
+                ttt_eval_ms = int(ttt_match.group(5))
             continue
 
         if model_bytes is None:
@@ -157,7 +176,14 @@ def main() -> int:
     if artifact_bytes is None:
         artifact_bytes = model_bytes + code_bytes
     requested_eval_stride = int(env.get("EVAL_STRIDE", "0"))
-    if requested_eval_stride > 0:
+    requested_ttt = bool(int(env.get("TTT_ENABLED", "0")))
+    if requested_ttt:
+        if ttt_post_quant_bpb is None:
+            raise ValueError("config requested TTT eval but no final_ttt_eval metric was found")
+        eval_mode = "score_first_ttt"
+        post_quant_bpb = ttt_post_quant_bpb
+        eval_ms = ttt_eval_ms or 0
+    elif requested_eval_stride > 0:
         if sliding_post_quant_bpb is None:
             raise ValueError("config requested sliding eval but no final_sliding_window_eval metric was found")
         eval_mode = "sliding_window"
@@ -200,6 +226,16 @@ def main() -> int:
         summary["sliding_eval_seconds"] = round(sliding_eval_ms / 1000.0, 3)
     if sliding_stride is not None:
         summary["sliding_stride"] = sliding_stride
+    if ttt_post_quant_bpb is not None:
+        summary["ttt_post_quant_bpb"] = ttt_post_quant_bpb
+    if ttt_eval_ms is not None:
+        summary["ttt_eval_seconds"] = round(ttt_eval_ms / 1000.0, 3)
+    if ttt_chunk_tokens is not None:
+        summary["ttt_chunk_tokens"] = ttt_chunk_tokens
+    if ttt_epochs is not None:
+        summary["ttt_epochs"] = ttt_epochs
+    if ttt_lr is not None:
+        summary["ttt_lr"] = ttt_lr
 
     validate_summary(summary)
     out_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

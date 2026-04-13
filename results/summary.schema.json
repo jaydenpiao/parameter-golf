@@ -59,7 +59,8 @@
       "type": "string",
       "enum": [
         "standard_roundtrip",
-        "sliding_window"
+        "sliding_window",
+        "score_first_ttt"
       ]
     },
     "eval_stride": {
@@ -83,6 +84,25 @@
     "sliding_stride": {
       "type": "integer",
       "minimum": 1
+    },
+    "ttt_post_quant_bpb": {
+      "type": "number"
+    },
+    "ttt_eval_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "ttt_chunk_tokens": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ttt_epochs": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ttt_lr": {
+      "type": "number",
+      "exclusiveMinimum": 0
     },
     "config_name": {
       "type": "string",
