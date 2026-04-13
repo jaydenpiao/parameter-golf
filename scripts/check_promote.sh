@@ -14,6 +14,10 @@ SOURCE_PATH="${3:?usage: scripts/check_promote.sh <config> <log> <source>}"
 
 load_config "${CONFIG_PATH}"
 
+python3 "${SCRIPT_DIR}/check_config_support.py" \
+  --config "${CONFIG_PATH}" \
+  --source "${SOURCE_PATH}"
+
 "${SCRIPT_DIR}/check_metric.sh" "${CONFIG_PATH}" "${LOG_PATH}" "${SOURCE_PATH}"
 
 SUMMARY_PATH="${REPO_ROOT}/results/${RUN_ID}/summary.json"
