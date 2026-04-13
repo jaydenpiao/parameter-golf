@@ -46,6 +46,8 @@ if not str(summary.get("git_sha", "")).strip():
     raise SystemExit("promotion check failed: missing git_sha")
 if not str(summary.get("repro_command", "")).strip():
     raise SystemExit("promotion check failed: missing repro_command")
+if summary.get("git_dirty") is not False:
+    raise SystemExit("promotion check failed: summary.git_dirty must be false")
 
 print("promotion check passed")
 PY

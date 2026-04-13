@@ -68,6 +68,8 @@ Live frontier PRs to monitor, not trust blindly:
 - Local Mac runs are plumbing-only.
 - 1xH100 is the ablation tier.
 - 8xH100 is reserved for promoted candidates.
+- Promotable runs must come from a clean checkout and produce `git_dirty=false`
+  in `results/<run-id>/summary.json`.
 - Promote a change to 8xH100 only after a reduced run shows a real quality delta
   or a real speed win.
 - Require 3 seeds before any submission candidate is treated as real.
