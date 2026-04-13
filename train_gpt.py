@@ -17,6 +17,7 @@ import sys
 import time
 import uuid
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -295,6 +296,7 @@ def eval_val(
 def eval_val_sliding_window(
     args: Hyperparameters,
     base_model: nn.Module,
+    forward_logits_fn: Callable[[Tensor], Tensor] | None,
     rank: int,
     world_size: int,
     device: torch.device,
@@ -335,7 +337,7 @@ def eval_val_sliding_window(
             ).to(device=device, dtype=torch.int64, non_blocking=True)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                logits = base_model.forward_logits(inputs)
+                logits = (forward_logits_fn or base_model.forward_logits)(inputs)
 
             scored_logits = logits[:, -stride:, :].reshape(-1, logits.size(-1))
             targets = torch.stack(
@@ -383,6 +385,7 @@ def compute_bpb_from_sums(val_loss_sum: Tensor, val_token_count: Tensor, val_byt
 def score_token_slice_sliding_window(
     args: Hyperparameters,
     base_model: nn.Module,
+    forward_logits_fn: Callable[[Tensor], Tensor] | None,
     device: torch.device,
     token_slice: Tensor,
     base_bytes_lut: Tensor,
@@ -404,33 +407,34 @@ def score_token_slice_sliding_window(
     val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     val_token_count = torch.zeros((), device=device, dtype=torch.float64)
     val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
+    chunk_device = token_slice.to(device=device, dtype=torch.int64, non_blocking=True)
 
     base_model.eval()
     with torch.inference_mode():
         for batch_start in range(0, num_windows, args.eval_batch_seqs):
             batch_ids = range(batch_start, min(batch_start + args.eval_batch_seqs, num_windows))
             inputs = torch.stack(
-                [token_slice[w * stride : w * stride + seq_len] for w in batch_ids]
-            ).to(device=device, dtype=torch.int64, non_blocking=True)
+                [chunk_device[w * stride : w * stride + seq_len] for w in batch_ids]
+            )
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                logits = base_model.forward_logits(inputs)
+                logits = (forward_logits_fn or base_model.forward_logits)(inputs)
 
             scored_logits = logits[:, -stride:, :].reshape(-1, logits.size(-1))
             targets = torch.stack(
                 [
-                    token_slice[w * stride + seq_len - stride + 1 : w * stride + seq_len + 1]
+                    chunk_device[w * stride + seq_len - stride + 1 : w * stride + seq_len + 1]
                     for w in batch_ids
                 ]
-            ).to(device=device, dtype=torch.int64, non_blocking=True).reshape(-1)
+            ).reshape(-1)
 
             loss = F.cross_entropy(scored_logits.float(), targets, reduction="sum")
             val_loss_sum += loss.to(torch.float64)
             val_token_count += float(targets.numel())
 
             prev_ids = torch.stack(
-                [token_slice[w * stride + seq_len - stride : w * stride + seq_len] for w in batch_ids]
-            ).to(device=device, dtype=torch.int64, non_blocking=True).reshape(-1)
+                [chunk_device[w * stride + seq_len - stride : w * stride + seq_len] for w in batch_ids]
+            ).reshape(-1)
 
             token_bytes = base_bytes_lut[targets].to(dtype=torch.int16)
             token_bytes += (has_leading_space_lut[targets] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
@@ -460,6 +464,7 @@ def build_ttt_chunk_ranges(total_tokens: int, chunk_tokens: int, min_chunk_token
 
 def adapt_model_on_token_slice(
     args: Hyperparameters,
+    train_model: nn.Module,
     base_model: nn.Module,
     device: torch.device,
     token_slice: Tensor,
@@ -473,14 +478,14 @@ def adapt_model_on_token_slice(
     x = local[:-1].reshape(-1, args.train_seq_len)
     y = local[1:].reshape(-1, args.train_seq_len)
 
-    base_model.train()
+    train_model.train()
     for _ in range(args.ttt_epochs):
         for batch_start in range(0, x.size(0), TTT_BATCH_SEQS):
             xb = x[batch_start : batch_start + TTT_BATCH_SEQS]
             yb = y[batch_start : batch_start + TTT_BATCH_SEQS]
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                loss = base_model(xb, yb)
+                loss = train_model(xb, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), TTT_GRAD_CLIP)
             optimizer.step()
@@ -489,7 +494,9 @@ def adapt_model_on_token_slice(
 
 def eval_val_score_first_ttt(
     args: Hyperparameters,
+    train_model: nn.Module,
     base_model: nn.Module,
+    forward_logits_fn: Callable[[Tensor], Tensor] | None,
     device: torch.device,
     val_tokens: Tensor,
     base_bytes_lut: Tensor,
@@ -512,6 +519,7 @@ def eval_val_score_first_ttt(
         chunk_loss_sum, chunk_token_count, chunk_byte_count = score_token_slice_sliding_window(
             args,
             base_model,
+            forward_logits_fn,
             device,
             chunk_tokens,
             base_bytes_lut,
@@ -523,7 +531,7 @@ def eval_val_score_first_ttt(
         total_byte_count += chunk_byte_count
 
         if chunk_idx != len(chunk_ranges) - 1:
-            adapt_model_on_token_slice(args, base_model, device, chunk_tokens, ttt_optimizer)
+            adapt_model_on_token_slice(args, train_model, base_model, device, chunk_tokens, ttt_optimizer)
 
     return compute_bpb_from_sums(total_loss_sum, total_token_count, total_byte_count)
 
@@ -1123,6 +1131,7 @@ def main() -> None:
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+    forward_logits_fn: Callable[[Tensor], Tensor] | None = None
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -1249,6 +1258,22 @@ def main() -> None:
         if distributed:
             model.require_backward_grad_sync = True
         train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+
+    if args.eval_stride > 0 or args.ttt_enabled:
+        candidate_forward_logits = torch.compile(base_model.forward_logits, dynamic=False, fullgraph=True)
+        dummy_inputs = torch.zeros((max(1, args.eval_batch_seqs), args.train_seq_len), device=device, dtype=torch.int64)
+        try:
+            base_model.eval()
+            with torch.inference_mode():
+                _ = candidate_forward_logits(dummy_inputs)
+            torch.cuda.synchronize()
+            forward_logits_fn = candidate_forward_logits
+            log0("forward_logits:compiled")
+        except Exception:
+            forward_logits_fn = base_model.forward_logits
+            log0("forward_logits:compile_fallback")
+        finally:
+            base_model.train()
 
     # -----------------------------
     # MAIN TRAINING LOOP
@@ -1416,6 +1441,7 @@ def main() -> None:
         sw_val_loss, sw_val_bpb = eval_val_sliding_window(
             args,
             base_model,
+            forward_logits_fn,
             rank,
             world_size,
             device,
@@ -1440,7 +1466,9 @@ def main() -> None:
         t_ttt = time.perf_counter()
         ttt_val_loss, ttt_val_bpb = eval_val_score_first_ttt(
             args,
+            compiled_model,
             base_model,
+            forward_logits_fn,
             device,
             val_tokens,
             base_bytes_lut,
