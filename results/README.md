@@ -8,6 +8,7 @@ results/<run-id>/
   train.log
   eval.log
   command.sh
+  artifacts/
 ```
 
 `summary.json` is the canonical machine-readable record for dashboards, checks,
@@ -19,8 +20,15 @@ When a run enables an alternate evaluation mode such as sliding-window eval,
 Preserve the standard roundtrip metrics in separate fields such as
 `standard_post_quant_bpb` and `standard_eval_seconds` so comparisons stay explicit.
 
+Binary runtime artifacts from CUDA runs should live under
+`results/<run-id>/artifacts/`, not in repo root, so a clean checkout stays clean
+through summary collection.
+
 Runs should record both `git_sha` and `git_dirty`. A SHA without dirty-state
 information is not enough to reproduce a run from an uncommitted worktree.
+
+Treat `git_dirty=false` as a promotion requirement. Exploratory runs can still be
+dirty, but `scripts/check_promote.sh` should reject them.
 
 Every run that might influence strategy should also carry a manual legality review:
 

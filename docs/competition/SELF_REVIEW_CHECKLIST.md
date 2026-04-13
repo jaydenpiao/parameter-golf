@@ -9,7 +9,8 @@ upstream submission PR.
 2. Exact training script path
 3. Exact `results/<run-id>/command.sh`
 4. Exact git SHA in `summary.json`
-5. Exact legality review in `results/<run-id>/legality.json`
+5. `git_dirty=false` in `summary.json`
+6. Exact legality review in `results/<run-id>/legality.json`
 
 ## Gate Checks
 

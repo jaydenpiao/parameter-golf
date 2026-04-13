@@ -23,7 +23,9 @@ if ! command -v torchrun >/dev/null 2>&1; then
 fi
 
 RESULT_DIR="${REPO_ROOT}/results/${RUN_ID}"
+ARTIFACT_DIR="results/${RUN_ID}/artifacts"
 mkdir -p "${RESULT_DIR}"
+mkdir -p "${REPO_ROOT}/${ARTIFACT_DIR}"
 
 if [[ ! -f "${RESULT_DIR}/legality.json" ]]; then
   python3 - "${REPO_ROOT}/results/legality.template.json" "${RESULT_DIR}/legality.json" "${TRACK}" <<'PY'
@@ -47,12 +49,12 @@ cat > "${RESULT_DIR}/command.sh" <<EOF
 set -a
 source ${CONFIG_PATH}
 set +a
-torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-1} ${TRAIN_SCRIPT}
+OUT_DIR=${ARTIFACT_DIR} torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-1} ${TRAIN_SCRIPT}
 EOF
 
 (
   cd "${REPO_ROOT}"
-  torchrun --standalone --nproc_per_node="${NPROC_PER_NODE:-1}" "${TRAIN_SCRIPT}"
+  OUT_DIR="${ARTIFACT_DIR}" torchrun --standalone --nproc_per_node="${NPROC_PER_NODE:-1}" "${TRAIN_SCRIPT}"
 ) | tee "${RESULT_DIR}/train.log"
 
 python3 "${SCRIPT_DIR}/collect_summary.py" \
