@@ -17,7 +17,8 @@ sidecar from `#1510`.
 - Scratch neural clone: `/workspace/research/parameter-golf-upstream`
 - Scratch tokenizer clone: `/workspace/research/parameter-golf-pr1578`
 - Scratch compression clone: `/workspace/research/parameter-golf-pr1510`
-- Pod access used for all work: `ssh root@103.207.149.90 -p 10229 -i ~/.ssh/id_ed25519`
+- Earlier direct TCP endpoint: `ssh root@103.207.149.90 -p 10229 -i ~/.ssh/id_ed25519`
+- Current pod access used for this batch: `ssh -i ~/.ssh/id_ed25519 f0zqqxsw2cfgv3-64412193@ssh.runpod.io`
 
 ## `#1529` Minimal Reproduction Patch
 
@@ -78,6 +79,17 @@ The synced artifacts/logs live under ignored local result folders:
 
 - `results/pr1529_smoke_v2/`
 - `results/pr1529_signal_300_val1m_fixed/`
+- `results/pr1529_ablate_tttlr_003/`
+- `results/pr1529_stability_tttlr_003_r1/`
+- `results/pr1529_ablate_tttlr_004/`
+- `results/pr1529_stability_tttlr_004_r1/`
+- `results/pr1529_ablate_parstart_7/`
+- `results/pr1529_stability_parstart_7_r1/`
+- `results/pr1529_ablate_parstart_9/`
+- `results/pr1529_ablate_muon_0965/`
+- `results/pr1529_ablate_muon_0975/`
+- `results/pr1529_ablate_gptqreserve_16/`
+- `results/pr1529_ablate_gptqreserve_10/`
 - `results/pr1578_verify_bytes/`
 - `results/pr1510_ans_analysis/`
 - `results/legal_ttt_sp1024_1xh100/`
@@ -201,30 +213,157 @@ Interpretation:
 - This makes `TTT_LR=0.02` the new parent setting for the next reduced-loop
   ablations.
 
+### Third config-only ablation: `TTT_LR=0.03`
+
+Source logs:
+
+- `results/pr1529_ablate_tttlr_003/artifacts/logs/pr1529_ablate_tttlr_003.txt`
+- `results/pr1529_stability_tttlr_003_r1/artifacts/logs/pr1529_stability_tttlr_003_r1.txt`
+
+Measured against the `TTT_LR=0.02` parent:
+
+- Parent (`TTT_LR=0.02`): legal TTT BPB `1.81829712`, size `16,016,384` bytes
+- `TTT_LR=0.03`: legal TTT BPB `1.78056575`, size `16,016,687` bytes
+- Stability rerun: legal TTT BPB `1.77876833`, size `16,015,609` bytes
+
+Interpretation:
+
+- Increasing `TTT_LR` again from `0.02` to `0.03` is a real, stable win.
+- The stability rerun is slightly better than the first sample and slightly
+  smaller.
+- This makes `TTT_LR=0.03` the new parent for the next reduced-loop ablations.
+
+### Fourth config-only ablation: `TTT_LR=0.04`
+
+Source logs:
+
+- `results/pr1529_ablate_tttlr_004/artifacts/logs/pr1529_ablate_tttlr_004.txt`
+- `results/pr1529_stability_tttlr_004_r1/artifacts/logs/pr1529_stability_tttlr_004_r1.txt`
+
+Measured against the `TTT_LR=0.03` parent:
+
+- Parent (`TTT_LR=0.03` stability): legal TTT BPB `1.77876833`, size `16,015,609` bytes
+- `TTT_LR=0.04`: legal TTT BPB `1.75336425`, size `16,016,477` bytes
+- Stability rerun: legal TTT BPB `1.75484111`, size `16,015,888` bytes
+
+Interpretation:
+
+- `TTT_LR=0.04` is another clear win over `0.03`.
+- The gain is stable, with only a very small size increase versus the
+  `0.03` stability rerun.
+- This makes `TTT_LR=0.04` the new parent before moving to other knobs.
+
+### Fifth config-only ablation: `PARALLEL_RESIDUAL_START`
+
+Source logs:
+
+- `results/pr1529_ablate_parstart_7/artifacts/logs/pr1529_ablate_parstart_7.txt`
+- `results/pr1529_stability_parstart_7_r1/artifacts/logs/pr1529_stability_parstart_7_r1.txt`
+- `results/pr1529_ablate_parstart_9/artifacts/logs/pr1529_ablate_parstart_9.txt`
+
+Measured against the `TTT_LR=0.04`, `PARALLEL_RESIDUAL_START=8` parent:
+
+- Parent (`start=8` stability): legal TTT BPB `1.75484111`, size `16,015,888` bytes
+- `start=7`: legal TTT BPB `1.67043940`, size `16,016,264` bytes
+- `start=7` stability rerun: legal TTT BPB `1.66993355`, size `16,014,422` bytes
+- `start=9`: legal TTT BPB `1.85379938`, size `16,017,103` bytes
+
+Interpretation:
+
+- Moving the parallel residual start earlier to layer `7` is the dominant win
+  in this entire batch.
+- The `start=7` stability rerun is even slightly better than the first sample
+  and brings the total size to only `14,422` bytes over the competition cap.
+- Moving the start later to layer `9` is a clear regression and closes this
+  knob with `start=7` as the promoted parent.
+
+### Sixth config-only ablation: `MUON_MOMENTUM`
+
+Source logs:
+
+- `results/pr1529_ablate_muon_0965/artifacts/logs/pr1529_ablate_muon_0965.txt`
+- `results/pr1529_ablate_muon_0975/artifacts/logs/pr1529_ablate_muon_0975.txt`
+
+Measured against the `TTT_LR=0.04`, `PARALLEL_RESIDUAL_START=7`,
+`MUON_MOMENTUM=0.97` parent:
+
+- Parent: legal TTT BPB `1.66993355`, size `16,014,422` bytes
+- `MUON_MOMENTUM=0.965`: legal TTT BPB `1.67166528`, size `16,016,631` bytes
+- `MUON_MOMENTUM=0.975`: legal TTT BPB `1.67065660`, size `16,015,301` bytes
+
+Interpretation:
+
+- Both nearby momentum values regress on legal TTT BPB.
+- `0.975` is closer to the parent than `0.965`, but neither beats the default
+  `0.97`.
+- This closes the momentum knob with `MUON_MOMENTUM=0.97` retained.
+
+### Seventh config-only ablation: `GPTQ_RESERVE_SECONDS`
+
+Source logs:
+
+- `results/pr1529_ablate_gptqreserve_16/artifacts/logs/pr1529_ablate_gptqreserve_16.txt`
+- `results/pr1529_ablate_gptqreserve_10/artifacts/logs/pr1529_ablate_gptqreserve_10.txt`
+
+Measured against the same promoted parent:
+
+- Parent (`13s`): legal TTT BPB `1.66993355`, size `16,014,422` bytes
+- `GPTQ_RESERVE_SECONDS=16`: legal TTT BPB `1.67151656`, size `16,014,822` bytes
+- `GPTQ_RESERVE_SECONDS=10`: legal TTT BPB `1.67208354`, size `16,015,317` bytes
+
+Interpretation:
+
+- Reserve-time changes are low leverage on this reduced SP8192 loop.
+- Both variants lose on quality and do not materially improve size.
+- This closes the reserve knob with `GPTQ_RESERVE_SECONDS=13` retained.
+
+## Current Reduced-Loop Parent
+
+After the completed quality-first ladder, the promoted reduced-loop parent is:
+
+- `TTT_LR=0.04`
+- `PARALLEL_RESIDUAL_START=7`
+- `MUON_MOMENTUM=0.97`
+- `GPTQ_RESERVE_SECONDS=13`
+- `HASH_EMBED_ENABLED=1`
+
+Measured on the `1,048,576`-token reduced validation shard:
+
+- Pre-quant BPB: `2.43263471`
+- Standard quantized BPB: `2.43655021`
+- Sliding quantized BPB: `2.43174693`
+- Legal TTT BPB: `1.66993355`
+- Standard eval time: `4.995s`
+- Sliding eval time: `22.524s`
+- Legal TTT eval time: `42.641s`
+- Total submission size: `16,014,422` bytes
+- Improvement vs the earlier `TTT_LR=0.02` parent: about `0.1484` BPB
+
 ## Competition Conclusions
 
 1. `#1529` is now reproducible on 1xH100 with a practical reduced-val loop.
-2. The immediate constraint on the SP8192 lane is artifact size, not bring-up.
-3. Legal TTT remains the largest measured eval gain in the reduced loop.
-4. Tokenizer work is ready from a byte-correctness perspective, but should stay
-   behind the neural lane until the base is stable.
-5. ANS is strategically important for SP8192, but low leverage for the current
-   SP1024 proof model.
-6. Decreasing `TTT_LR` to `0.005` is the wrong direction for quality on this
-   lane, even though it roughly halves TTT eval time.
-7. Increasing `TTT_LR` to `0.02` is a real reduced-loop improvement and should
-   be treated as the new local parent.
+2. The biggest measured quality gain in this batch came from moving
+   `PARALLEL_RESIDUAL_START` earlier to `7`, not from optimizer timing knobs.
+3. Legal TTT remains the dominant eval gain in the reduced loop.
+4. The current reduced-loop parent is only `14,422` bytes over the size cap, so
+   compression is now strategically relevant on the exact winning family rather
+   than only as a generic sidecar idea.
+5. Nearby `MUON_MOMENTUM` and `GPTQ_RESERVE_SECONDS` changes are low leverage on
+   this lane and can be deprioritized.
+6. Tokenizer work is byte-ready, but the SP8192 neural lane is now strong
+   enough that the next sidecar to revisit should be compression, not
+   retokenization.
+7. The current parent improves legal TTT BPB by about `0.1484` over the
+   earlier `TTT_LR=0.02` parent while slightly reducing total size.
 
 ## Next Priority Order
 
-1. Run config-only ablations on the reduced `#1529` lane:
-   - `TTT_LR` upward from `0.02`, then stop if quality rolls over
-   - `PARALLEL_RESIDUAL_START`
-   - `MUON_MOMENTUM`
-   - `QK_GAIN_INIT` if the script exposes it
-   - `GPTQ_RESERVE_SECONDS`
-2. Prefer ablations that either:
-   - improve legal TTT BPB on the reduced loop, or
-   - pull total size below `16,000,000` bytes.
-3. Only after a stable config-only win, compare against merged `1.0810` and
-   decide whether to port one merged neural ingredient that `#1529` lacks.
+1. Evaluate ANS on the exact promoted SP8192 parent, because the current size
+   overage is only `14,422` bytes and earlier sidecar analysis showed large ANS
+   leverage on SP8192-sized artifacts.
+2. If ANS is not sufficient or is too operationally awkward, return to neural
+   work only for knobs or ingredients with evidence stronger than the nearby
+   `MUON_MOMENTUM` and `GPTQ_RESERVE_SECONDS` variants.
+3. After closing the size question on the current family, compare against
+   merged `1.0810` and decide whether to port one missing merged ingredient
+   rather than continuing local micro-ablations blindly.
