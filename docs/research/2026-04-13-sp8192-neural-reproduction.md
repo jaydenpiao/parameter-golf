@@ -714,3 +714,137 @@ Interpretation:
    - a larger-shard `#1735` sanity run, or
    - an actual 8xH100/full-validation `#1735` reproduction when compute is
      available.
+
+## 2026-04-21 2M-Shard `#1735` Pre-Quant TTT Tuning
+
+This batch stayed on 1xH100 and moved `#1735` off the highly overfit 1M-token
+validation loop. A new scratch data root was created on the pod:
+
+- `/workspace/research/data_roots/pr1735_val2m`
+- train shard: symlink to the existing SP8192 `fineweb_train_000000.bin`
+- tokenizer: symlink to the existing `fineweb_8192_bpe.model`
+- validation shard: first `2,097,153` tokens from the full SP8192 validation
+  shard with `header[2]` rewritten, yielding `2,097,152` scored validation
+  tokens in the record script
+
+The first `2M` run failed late during serialization because the migrated pod was
+missing the `brotli` module. Training and pre-quant TTT had already completed.
+The environment was fixed with `python3 -m pip install --break-system-packages
+brotli`, and the same run was repeated as `r2`.
+
+### `#1735` 2M-shard baseline
+
+Source logs:
+
+- failed environment run: `results/pr1735_signal_300_val2m_r1/record.log`
+- clean run: `results/pr1735_signal_300_val2m_r2/record.log`
+
+Run setup:
+
+- Iterations: `300`
+- Validation tokens: `2,097,152`
+- `PREQUANT_TTT_LR=0.0005`
+- `PREQUANT_TTT_FREEZE_BLOCKS=2`
+- `PREQUANT_TTT_EPOCHS=21`
+
+Clean `r2` result:
+
+- Step-300 validation BPB: `1.3505`
+- Post-EMA pre-quant BPB: `2.32622172`
+- Post-prequant-TTT BPB: `0.59151500`
+- Quantized BPB: `0.72429508`
+- Quantized sliding BPB: `0.92366498`
+- Pre-quant TTT time: `175.9s`
+- Sliding eval time: `70.194s`
+- Raw submission size before code LZMA wrap: `16,074,854` bytes
+
+Interpretation:
+
+- The larger shard reduces the extreme 1M-token overfit signal, as expected.
+- It is still not leaderboard-comparable, but it is a better inner-loop proxy
+  for pre-quant TTT settings than the 1M shard.
+- The raw size warning is still expected because this scratch path measures
+  unwrapped code bytes; `#1735` uses code LZMA wrapping for under-cap records.
+
+### `#1758` retune transferred to non-casefold `#1735`
+
+PR `#1758` reports that the `#1738` CaseOps stack improves by changing only:
+
+- `PREQUANT_TTT_LR`: `5e-4` -> `1e-3`
+- `PREQUANT_TTT_FREEZE_BLOCKS`: `2` -> `0`
+
+The same config-only retune was tested on the non-casefold `#1735` family using
+the 2M validation root.
+
+Source log: `results/pr1735_signal_300_val2m_lr1e3_unfrozen_r1/record.log`
+
+Measured result:
+
+- Validation tokens: `2,097,152`
+- `PREQUANT_TTT_LR=0.001`
+- `PREQUANT_TTT_FREEZE_BLOCKS=0`
+- Post-prequant-TTT BPB: `0.37838465`
+- Quantized BPB: `0.49164964`
+- Quantized sliding BPB: `0.63312403`
+- Pre-quant TTT time: `199.0s`
+- Sliding eval time: `39.746s`
+- Raw submission size before code LZMA wrap: `16,071,776` bytes
+
+Interpretation:
+
+- The `#1758` retune transfers cleanly to the non-casefold `#1735` family.
+- It improves the 2M-shard sliding score by `0.29054095` BPB relative to the
+  `5e-4/freeze=2` baseline.
+- It also slightly reduces raw submission size in this scratch run.
+
+### Higher-LR exploratory ablation
+
+Because the `1e-3/freeze=0` pre-quant TTT curve was still descending at epoch
+21, one additional exploratory run tested `PREQUANT_TTT_LR=0.0015` with
+`PREQUANT_TTT_FREEZE_BLOCKS=0`. Upstream `#1758` reports that still-higher LRs
+can diverge, so this was treated as a bounded risk.
+
+Source log: `results/pr1735_signal_300_val2m_lr15e4_unfrozen_r1/record.log`
+
+Measured result:
+
+- Validation tokens: `2,097,152`
+- `PREQUANT_TTT_LR=0.0015`
+- `PREQUANT_TTT_FREEZE_BLOCKS=0`
+- Post-prequant-TTT BPB: `0.36132346`
+- Quantized BPB: `0.46254170`
+- Quantized sliding BPB: `0.58760825`
+- Pre-quant TTT time: `186.7s`
+- Sliding eval time: `40.014s`
+- Raw submission size before code LZMA wrap: `16,072,802` bytes
+
+Interpretation:
+
+- `0.0015/freeze=0` did not diverge on the 2M non-casefold loop.
+- It is the current 2M-shard parent, beating `1e-3/freeze=0` by `0.04551578`
+  sliding BPB.
+- Do not extrapolate this directly to leaderboard quality; the correct next
+  step is either a larger validation shard or a TTT-only sweep harness that
+  avoids retraining the same 300-step model for each LR.
+
+## Current 1xH100 Parent
+
+For the non-casefold `#1735` safe lane, the current 1xH100 reduced parent is:
+
+- data: `2,097,152` validation tokens
+- training: `300` iterations, one SP8192 train shard
+- `PREQUANT_TTT_EPOCHS=21`
+- `PREQUANT_TTT_LR=0.0015`
+- `PREQUANT_TTT_FREEZE_BLOCKS=0`
+- quantized sliding BPB: `0.58760825`
+
+Next useful work:
+
+1. Build or scratch-patch a TTT-only sweep harness that saves the pre-TTT EMA
+   model once, then sweeps `PREQUANT_TTT_LR` / freeze depth without repeating
+   the 300-step training pass.
+2. If keeping the simple runner, test `PREQUANT_TTT_LR=0.002` only as a
+   bounded divergence check; upstream evidence says this may be unstable.
+3. If more compute arrives, run the exact `#1735` or `#1758`-style
+   `LR=0.0015/freeze=0` setting on fuller validation / 8xH100 before preparing
+   a real submission.
