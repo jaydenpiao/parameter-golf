@@ -1027,3 +1027,168 @@ Acceptance for the 300-step signal:
    pre-quant validation TTT or we only need it as a non-submission proxy.
 5. Keep `#1698`, `#1787`, and `#1795` as idea sources until their metric,
    artifact-size, or legality blockers are resolved.
+
+## 2026-04-26 `#1812` 1xH100 Reproduction
+
+This batch used the Runpod direct TCP endpoint
+`root@103.207.149.110 -p 16307` on a fresh `1xH100 80GB` pod. The checkout
+under `/workspace/parameter-golf` was left untouched; all work happened in
+`/workspace/research/parameter-golf-pr1812`.
+
+Pod preflight:
+
+- GPU: `NVIDIA H100 80GB HBM3`
+- Free `/workspace`: about `50 GB`
+- PyTorch: `2.9.1+cu128`
+- CUDA available: `True`
+- Existing deps: `sentencepiece`, `flash_attn_interface`, `flash_attn`
+- Missing dep fixed before runs: `brotli`
+
+Local result copies:
+
+- `results/pr1812_smoke_20/`
+- `results/pr1812_signal_300_val2m_failed/`
+- `results/pr1812_signal_300_val2m_3shards/`
+- `results/pr1812_signal_300_val2m_3shards_chunk32k/`
+
+### Setup
+
+The `sp8192` data root was downloaded from `kevclark/parameter-golf`. The
+existing reduced-shard helper created a valid 2M-token validation proxy:
+
+- validation path:
+  `/workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192_val2m/fineweb_val_000000.bin`
+- stored tokens: `2,097,153`
+- scored tokens in the record script: `2,097,152`
+
+The first setup used one train shard because that matched prior reduced-loop
+habits. That was sufficient for smoke but not for 300 training iterations with
+this record loader.
+
+### Smoke: 20 steps, one train shard
+
+Source log: `results/pr1812_smoke_20/pr1812_smoke_20.txt`
+
+- Train steps: `20`
+- Train shard count: `1`
+- Validation tokens: `2,097,152`
+- Step-20 BPB: `2.2843`
+- Pre-quant post-EMA BPB: `3.28529543`
+- Quantized BPB: `3.28576826`
+- Quantized sliding BPB: `3.28539856`
+- Quantized TTT BPB: `2.94771200`
+- TTT chunks: `32`
+- TTT eval time: `103.275s`
+- Quantized model bytes: `15,937,482`
+
+Interpretation:
+
+- `#1812` boots cleanly on 1xH100 with official SP8192 data.
+- The score-first TTT path runs and improves BPB even at 20 train steps.
+- The smoke artifact is under the decimal 16 MB model-only threshold.
+
+### Failed 300-step attempt: one train shard
+
+Source logs:
+
+- `results/pr1812_signal_300_val2m_failed/console_signal.log`
+- `results/pr1812_signal_300_val2m_failed/pr1812_signal_300_val2m.txt`
+
+Failure:
+
+```text
+IndexError: index 11 is out of bounds for axis 0 with size 11
+```
+
+Root cause:
+
+- The record script's `ShuffledSequenceLoader.next_batch` builds a
+  per-microbatch `shard_plan`.
+- With one train shard, the loader runs out of remaining sequence starts around
+  step `127`, micro-step `1`.
+- At that point `shard_plan` has only `11` entries while the device batch wants
+  `48`, causing the out-of-bounds access.
+- This is a reduced-data setup issue, not a model or CUDA issue.
+
+Fix:
+
+- Download `--train-shards 3`.
+- Point `TRAIN_FILES` at the full
+  `fineweb10B_sp8192/fineweb_train_*.bin` pattern.
+- Keep `VAL_FILES` on the 2M validation proxy.
+
+Capacity check:
+
+- Three shards provide `146,484` first-epoch sequence starts.
+- The 300-step run including warmups needs about `130,560` sequence starts.
+
+### Signal: 300 steps, three train shards
+
+Source log:
+`results/pr1812_signal_300_val2m_3shards/pr1812_signal_300_val2m_3shards.txt`
+
+- Train steps: `300`
+- Train shard count: `3`
+- Validation tokens: `2,097,152`
+- Step-300 BPB: `1.3521`
+- Pre-quant post-EMA BPB: `2.04854828`
+- Quantized BPB: `2.05388719`
+- Quantized sliding BPB: `2.04933629`
+- Quantized TTT BPB: `1.72333777`
+- TTT chunks: `32`
+- TTT eval time: `77.913s`
+- Quantized model bytes: `16,003,213`
+
+Interpretation:
+
+- The three-shard setup fixes the loader failure and completes the reduced run.
+- `#1812` is now a reproducible 1xH100 reduced-loop lane.
+- The reduced-loop result is close to the previous `#1667` reduced signal
+  (`1.72047128`) but slightly worse on this proxy.
+- The compressed model is `3,213` bytes over the decimal 16 MB cap before code
+  bytes, so this is not submission-ready.
+
+### Probe: `TTT_CHUNK_TOKENS=32768`
+
+Source log:
+`results/pr1812_signal_300_val2m_3shards_chunk32k/pr1812_signal_300_val2m_3shards_chunk32k.txt`
+
+Only the TTT chunk-size env was changed from the successful three-shard signal:
+
+- `TTT_CHUNK_TOKENS=32768`
+
+Measured result:
+
+- Train steps: `300`
+- Train shard count: `3`
+- Validation tokens: `2,097,152`
+- Step-300 BPB: `1.3515`
+- Pre-quant post-EMA BPB: `2.04893225`
+- Quantized BPB: `2.05455175`
+- Quantized sliding BPB: `2.05042081`
+- Quantized TTT BPB: `1.66858393`
+- TTT chunks: `64`
+- TTT eval time: `80.710s`
+- Quantized model bytes: `16,003,606`
+
+Interpretation:
+
+- Halving the TTT chunk size is a clear reduced-loop win:
+  `1.72333777` -> `1.66858393`, an improvement of `0.05475384` BPB.
+- Eval time stays comfortably under the 600s budget on the 2M proxy.
+- The artifact remains slightly over cap, by `3,606` bytes model-only, so the
+  next move should be a size-aware follow-up rather than another pure-quality
+  probe.
+
+## Updated `#1812` Priority
+
+1. Keep `#1812` as the current legal official-SP8192 reproduction lane.
+2. Treat `TTT_CHUNK_TOKENS=32768` as the new reduced-loop parent for this lane.
+3. Do not open a submission branch yet: the model artifact is still a few KB
+   over the decimal 16 MB cap before code bytes.
+4. Next GPU-efficient step should be a narrow size fix on the same parent, not
+   `#1790` or another frontier family.
+5. Candidate size knobs to inspect before spending more GPU:
+   `GPTQ_CALIBRATION_BATCHES`, `matrix_clip_sigmas`, `embed_clip_sigmas`,
+   compressor settings, and whether the record's packed-code path measures
+   total bytes differently from this scratch copy.
