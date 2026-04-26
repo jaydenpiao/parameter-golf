@@ -1192,3 +1192,71 @@ Interpretation:
    `GPTQ_CALIBRATION_BATCHES`, `matrix_clip_sigmas`, `embed_clip_sigmas`,
    compressor settings, and whether the record's packed-code path measures
    total bytes differently from this scratch copy.
+
+## 2026-04-26 No-Pod `#1812` Size Triage
+
+The pod was stopped before another GPU run, so the only useful next work was
+artifact and script inspection. The current parent remains:
+
+- record: `#1812`
+- reduced validation: `2,097,152` scored tokens
+- train shards: `3`
+- `TTT_CHUNK_TOKENS=32768`
+- quantized TTT BPB: `1.66858393`
+- model artifact: `16,003,606` bytes
+
+Local artifact checks:
+
+- The parent artifact is `3,606` bytes over the decimal 16 MB model-only
+  threshold before packed code bytes.
+- Recompressing the byte-shuffled payload with the script's current Brotli
+  settings reproduces the same `16,003,606` bytes.
+- Recompressing with `brotli.compress(..., quality=11, lgwin=24)` produces
+  `16,002,167` bytes, saving `1,439` bytes. This is real but not sufficient
+  alone.
+- Generic compressors are worse on the same byte-shuffled payload:
+  `zlib9=18,194,911`, `gzip9=18,194,923`, `bz2_9=17,418,838`,
+  `lzma_preset9=17,011,144`.
+
+Unpacked script observations:
+
+- `_compress` only supports `COMPRESSOR=brotli` and currently calls
+  `brotli.compress(data, quality=11)` without an explicit `lgwin`.
+- The script exposes quantization-size knobs:
+  `MATRIX_CLIP_SIGMAS=12.85`, `EMBED_CLIP_SIGMAS=20.0`,
+  `MATRIX_BITS=6`, `EMBED_BITS=8`, and `LOWBIT_LAYERS`.
+- `LOWBIT_LAYERS` only changes the GPTQ clip range for matched parameter
+  names; tensors are still stored in the same packed artifact format. It may
+  improve compressibility, but it is a quality-riskier knob than Brotli window
+  size or clipping sigmas.
+- `GPTQ_CALIBRATION_BATCHES` is exposed and used by Hessian collection. Set it
+  explicitly in every follow-up command because the script has two defaults in
+  different initialization paths.
+
+Next pod sweep should stay on the exact 32K parent and change one size knob at
+a time:
+
+1. Scratch-patch `_compress` to
+   `brotli.compress(data, quality=11, lgwin=24)` and rerun the 300-step 32K
+   parent. This is the lowest-risk size win and should be kept in every later
+   size probe.
+2. If still over cap, run `MATRIX_CLIP_SIGMAS=12.5` with the Brotli `lgwin=24`
+   patch.
+3. If still over cap, run `EMBED_CLIP_SIGMAS=18.0` with the same parent.
+4. If still over cap or quality regresses badly, run
+   `GPTQ_CALIBRATION_BATCHES=32` to test whether calibration-time noise changes
+   size without a large BPB hit.
+5. Only if those fail, try a targeted `LOWBIT_LAYERS` pattern. Do not jump to
+   global `MATRIX_BITS=5` or `EMBED_BITS=7` unless this lane is being used only
+   as a last-minute size-clearing backup.
+
+Promotion criteria for the next pod session:
+
+- The artifact plus packed code must clear the challenge cap, not just the
+  model-only size.
+- The reduced 2M quantized TTT BPB should stay close to the current parent;
+  losing a few thousandths is acceptable for cap compliance, but a large
+  regression means the knob is not submission-worthy.
+- Keep the 300-step reduced loop until one candidate clears size. Do not spend
+  GPU on `#1790` comparison before `#1812` has either cleared size or been
+  rejected as too brittle.
