@@ -848,3 +848,182 @@ Next useful work:
 3. If more compute arrives, run the exact `#1735` or `#1758`-style
    `LR=0.0015/freeze=0` setting on fuller validation / 8xH100 before preparing
    a real submission.
+
+## 2026-04-26 No-Pod Frontier Triage
+
+No pod was running for this pass. The goal was to choose a single next
+`1xH100` target before spending more credit.
+
+This section supersedes the April 21 priority override. `#1735` remains useful
+as a reduced-loop systems proxy, but it is no longer a safe submission-prep
+family. Upstream review now flags its full-validation pre-quant TTT as likely
+violating Issue `#1017` score-before-update and causality: the final predictor
+is adapted on the same validation stream before scoring that stream, including
+future tokens. `#1758` inherits that risk.
+
+Issue `#1604` also remains open, so casefold / CaseOps / custom-normalization
+lanes are still policy-pending and should not be the only submission path.
+
+Primary sources refreshed in this pass:
+
+- Official leaderboard source:
+  [README](https://github.com/openai/parameter-golf/blob/main/README.md)
+- Normalization policy thread:
+  [openai/parameter-golf#1604](https://github.com/openai/parameter-golf/issues/1604)
+- Pre-quant TTT risk:
+  [openai/parameter-golf#1735](https://github.com/openai/parameter-golf/pull/1735),
+  [openai/parameter-golf#1758](https://github.com/openai/parameter-golf/pull/1758)
+- Apr 25/26 frontier targets:
+  [#1812](https://github.com/openai/parameter-golf/pull/1812),
+  [#1813](https://github.com/openai/parameter-golf/pull/1813),
+  [#1802](https://github.com/openai/parameter-golf/pull/1802),
+  [#1791](https://github.com/openai/parameter-golf/pull/1791),
+  [#1698](https://github.com/openai/parameter-golf/pull/1698),
+  [#1824](https://github.com/openai/parameter-golf/pull/1824),
+  [#1787](https://github.com/openai/parameter-golf/pull/1787),
+  [#1796](https://github.com/openai/parameter-golf/pull/1796), and
+  [#1795](https://github.com/openai/parameter-golf/pull/1795)
+
+### Frontier Table
+
+| Lane | Claimed score | Tokenizer / policy risk | Reproduction status | Decision |
+| --- | ---: | --- | --- | --- |
+| `#1812` SP8192 + LegalTTT 4ep | `1.07290` | Official SP8192, no tokenizer change, score-first TTT only | Self-contained record folder with logs and command: `SEED=42 TTT_ENABLED=1 TTT_LR=0.005 TTT_EPOCHS=4 torchrun --standalone --nproc_per_node=8 train_gpt.py` | **Primary next pod target** |
+| `#1813` Scylla QK5.25 recurrence | `0.94166` | Custom Scylla tokenizer/data path, no TTT | Record code/logs exist, but tokenizer files and data-prep script are not included; PR comments request them | Wait for assets or derive from `#1796` before GPU |
+| `#1796` Scylla + LegalTTT | `1.08057` | Custom Scylla tokenizer, less risky than casefold but still extra byte-accounting work | Includes tokenizer assets (`candidate.vocab`, `candidate.meta.npz`) and command-style record | Future Scylla-readiness lane, not first pod target |
+| `#1802` SP8192 + multi-phase global TTT | `1.07713` | Official SP8192; multi-phase TTT has more interpretive risk than simple chunk score-first TTT | Self-contained record, no comments yet | Secondary target after `#1812` |
+| `#1735/#1758` pre-quant TTT family | `1.04290` / `1.02840` | Official SP8192 / CaseOps variants, but pre-quant TTT on validation is under active legality challenge | Already runnable locally on reduced 2M proxy | Keep only as proxy; do not build sole submission on it |
+| `#1791` GDN/FLA K-KVShare-Wider | `1.03386` | Official SP8192; no TTT | Has requirements and record folder, but PR comments show reported logs likely used older non-canonical byte denominator; corrected estimate near `1.2169` | Do not target now |
+| `#1698` GatedDeltaNet + TTT | `1.00995` | Official SP8192; score-first TTT | Runnable in our pod history, but PR comments flag decimal size-cap failure and GDN byte-LUT bug; corrected canonical estimate near `1.189` | High-upside architecture only after fixes |
+| `#1824` recurrent SP1024 1xH100 | `1.50735` log-level result | Official SP1024, low policy risk | Simple `train_gpt.py` patch and logs, no record folder | Runnable but not competitive enough for current Track B focus |
+| `#1787` CaseOps + TTT/RTKD | `1.06335` | CaseOps policy-pending under `#1604`; GPTQ reserve timing also questioned | Self-contained enough to inspect, but not safe-only | Upside lane only |
+| `#1795` SP4096 + byte PPM mixture | `1.01252` | Online byte-level adaptive predictor still needs organizer ruling | Strict target-conditioned gate was fixed, but category legality remains open | Read-only idea source for now |
+
+### Target Selection
+
+The next pod session should target `#1812`, not `#1735/#1758`.
+
+Rationale:
+
+1. It uses the official SP8192 tokenizer and dataset path.
+2. It avoids pre-quant validation adaptation entirely.
+3. Its legality story is the already-merged score-first TTT pattern:
+   score each chunk, then train only on already-scored tokens.
+4. The PR ships a self-contained record folder, logs, and exact full-run
+   command.
+5. The reported score is weaker than the risky open frontier but strong enough
+   to be a credible backup-submission base if reproduced.
+
+`#1813` is the highest claimed non-casefold target, but it is not the first pod
+target because its PR currently lacks the Scylla tokenizer files and dataset
+preparation script needed to run independently. `#1796` may provide a path to
+that asset stack, but that is a local/tooling task before GPU.
+
+### Next 1xH100 Pod Contract
+
+Use a fresh scratch clone and leave `/workspace/parameter-golf` untouched:
+
+```bash
+cd /workspace/research
+git clone https://github.com/openai/parameter-golf.git parameter-golf-pr1812
+cd parameter-golf-pr1812
+git fetch origin pull/1812/head:pr1812
+git checkout pr1812
+
+python3 -m pip install brotli sentencepiece
+python3 -m pip install flash_attn_3 --no-deps \
+  --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291/
+
+MATCHED_FINEWEB_REPO_ID=kevclark/parameter-golf \
+  python3 data/cached_challenge_fineweb.py --variant sp8192 --train-shards 1
+
+git clone --branch research/sp8192-neural-reproduction \
+  https://github.com/jaydenpiao/parameter-golf.git /workspace/research/parameter-golf-tools
+
+python3 /workspace/research/parameter-golf-tools/scripts/research/write_reduced_shard.py \
+  --input /workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192/fineweb_val_000000.bin \
+  --output /workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192_val2m/fineweb_val_000000.bin \
+  --num-tokens 2097153 \
+  --symlink-train-from /workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192/fineweb_train_000000.bin
+
+RECORD_DIR=records/track_10min_16mb/2026-04-25_SP8192_3LayerRecur_LegalTTT_4ep
+cd "$RECORD_DIR"
+```
+
+The packed `#1812` script already supports `ITERATIONS`,
+`MAX_WALLCLOCK_SECONDS`, `VAL_LOSS_EVERY`, `SEED`, `TOKENIZER_PATH`,
+`TRAIN_FILES`, `VAL_FILES`, and TTT env vars. It does **not** support
+`DATA_PATH` or `OUT_DIR` as-is. Do not patch model logic. If run isolation is
+needed, either run from a per-run copy of the record folder or add an
+`OUT_DIR`-only scratch patch before launching multiple runs.
+
+Allowed scratch-interface knobs are:
+
+- `DATA_DIR`
+- `TRAIN_FILES`
+- `VAL_FILES`
+- `TOKENIZER_PATH`
+- `OUT_DIR` if added as an artifact-isolation patch
+- `ITERATIONS`
+- `VAL_LOSS_EVERY`
+- `MAX_WALLCLOCK_SECONDS`
+- `SEED`
+- `NPROC_PER_NODE`
+
+Run order:
+
+```bash
+RUN_ID=pr1812_smoke_20 \
+SEED=42 \
+TRAIN_FILES=/workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192_val2m/fineweb_train_*.bin \
+VAL_FILES=/workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192_val2m/fineweb_val_*.bin \
+TOKENIZER_PATH=/workspace/research/parameter-golf-pr1812/data/tokenizers/fineweb_8192_bpe.model \
+ITERATIONS=20 \
+MAX_WALLCLOCK_SECONDS=600 \
+VAL_LOSS_EVERY=0 \
+TTT_ENABLED=1 \
+TTT_LR=0.005 \
+TTT_EPOCHS=4 \
+torchrun --standalone --nproc_per_node=1 train_gpt.py
+
+RUN_ID=pr1812_signal_300_val2m \
+SEED=42 \
+TRAIN_FILES=/workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192_val2m/fineweb_train_*.bin \
+VAL_FILES=/workspace/research/parameter-golf-pr1812/data/datasets/fineweb10B_sp8192_val2m/fineweb_val_*.bin \
+TOKENIZER_PATH=/workspace/research/parameter-golf-pr1812/data/tokenizers/fineweb_8192_bpe.model \
+ITERATIONS=300 \
+MAX_WALLCLOCK_SECONDS=600 \
+VAL_LOSS_EVERY=0 \
+TTT_ENABLED=1 \
+TTT_LR=0.005 \
+TTT_EPOCHS=4 \
+torchrun --standalone --nproc_per_node=1 train_gpt.py
+```
+
+Acceptance for the smoke:
+
+- CUDA/FA3 imports work.
+- The official SP8192 tokenizer loads.
+- Training reaches artifact export.
+- Standard, sliding, and TTT metrics are emitted.
+- Logs and artifacts are copied back immediately.
+
+Acceptance for the 300-step signal:
+
+- Same `2,097,152`-token reduced validation proxy as the latest `#1735` runs.
+- Artifact remains below or close enough to the 16 MB cap to be actionable.
+- Eval stays score-first and under the reduced-session time budget.
+- Result is compared only against its own `#1812` reduced parent, not against
+  leaderboard scores.
+
+### Updated Priority Order
+
+1. Run `#1812` smoke and 300-step reduced signal on the next `1xH100` pod.
+2. If `#1812` boots cleanly, optionally compare `#1802` on the same proxy to
+   measure whether multi-phase global TTT is worth legal review.
+3. In parallel without GPU, inspect `#1796` to determine whether the Scylla
+   tokenizer/data stack can make `#1813` runnable.
+4. Do not spend more GPU on `#1735/#1758` unless staff explicitly permits
+   pre-quant validation TTT or we only need it as a non-submission proxy.
+5. Keep `#1698`, `#1787`, and `#1795` as idea sources until their metric,
+   artifact-size, or legality blockers are resolved.
