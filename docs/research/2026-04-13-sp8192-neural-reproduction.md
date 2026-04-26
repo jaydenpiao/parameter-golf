@@ -1240,6 +1240,15 @@ a time:
    `brotli.compress(data, quality=11, lgwin=24)` and rerun the 300-step 32K
    parent. This is the lowest-risk size win and should be kept in every later
    size probe.
+
+   ```bash
+   python3 /workspace/research/parameter-golf-tools/scripts/research/patch_packed_record.py \
+     train_gpt.py \
+     --replace 'return brotli.compress(data, quality=11)' \
+       'return brotli.compress(data, quality=11, lgwin=24)' \
+     --output train_gpt.py
+   ```
+
 2. If still over cap, run `MATRIX_CLIP_SIGMAS=12.5` with the Brotli `lgwin=24`
    patch.
 3. If still over cap, run `EMBED_CLIP_SIGMAS=18.0` with the same parent.
