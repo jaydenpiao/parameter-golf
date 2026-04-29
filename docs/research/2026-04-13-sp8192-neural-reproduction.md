@@ -1410,3 +1410,66 @@ steps are:
    exactly one more narrow lowbit escalation: add
    `blocks.10.attn.c_q.weight:5` (`c_k+c_v+c_q`) because the quant-only
    artifact was `15,941,937` bytes.
+
+## 2026-04-29 `#1812` Full 8xH100 Seed 42
+
+This batch used the Runpod direct TCP endpoint
+`root@103.207.149.96 -p 15600` on an `8xH100 80GB` pod. The scratch repo was
+recreated under `/workspace/research/parameter-golf-pr1812`.
+
+Local result copy:
+
+- `results/pr1812_full8_seed42_lgwin24_lowbit_attn10_kv/`
+
+Setup:
+
+- installed missing `brotli`
+- fetched `openai/parameter-golf#1812`
+- downloaded official SP8192 data from `kevclark/parameter-golf`
+- verified `80` train shards, `1` validation shard, and the SP8192 tokenizer
+- applied the scratch Brotli patch with
+  `scripts/research/patch_packed_record.py`
+
+Candidate config:
+
+- scratch Brotli patch: `brotli.compress(data, quality=11, lgwin=24)`
+- `TTT_CHUNK_TOKENS=32768`
+- `LOWBIT_LAYERS=blocks.10.attn.c_k.weight:5,blocks.10.attn.c_v.weight:5`
+- `GPTQ_CALIBRATION_BATCHES=64`
+- `SEED=42`
+- `MAX_WALLCLOCK_SECONDS=600`
+- `torchrun --standalone --nproc_per_node=8 train_gpt.py`
+
+Measured result:
+
+- Train stop: step `4615`, `600.015s`
+- Pre-quant post-EMA BPB: `1.08297128`
+- Quantized BPB: `1.09380490`
+- Quantized sliding BPB: `1.07717917`
+- Quantized TTT BPB: `1.07585987`
+- TTT eval time: `446.947s`
+- Quantized model bytes: `15,941,863`
+- Raw packed `train_gpt.py` bytes: `19,645`
+- Raw script plus model bytes: `15,961,508`
+- Conservative total margin versus decimal 16 MB: `38,492` bytes
+
+Interpretation:
+
+- Seed 42 is size-valid and legal-TTT complete on the full validation shard.
+- The result is not a leaderboard improvement over `#1812`'s public seed 42
+  TTT BPB `1.07303003`, but it is a credible size-clearing fallback candidate
+  because the lowbit change buys `~38 KB` conservative raw-total margin.
+- Seed 314 was started after seed 42 because the first seed was usable. The SSH
+  session later dropped while seed 314 was in post-training quantization; the
+  direct TCP endpoint then returned `Connection refused`, and the Runpod relay
+  path was not usable for automation due to `Your SSH client doesn't support
+  PTY`. Seed 314 is therefore not yet copied back or trusted.
+
+Next action:
+
+1. Refresh the direct TCP endpoint if Runpod remapped the pod, or restart a new
+   8xH100 pod if the old one died.
+2. If the seed 314 scratch state survived, copy its logs/artifact back before
+   rerunning anything.
+3. Otherwise rerun seed 314 first, then seed 999 only if seed 314 is
+   size-valid and near seed 42 quality.
