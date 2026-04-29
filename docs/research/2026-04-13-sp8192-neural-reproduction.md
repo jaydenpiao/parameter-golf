@@ -1269,3 +1269,144 @@ Promotion criteria for the next pod session:
 - Keep the 300-step reduced loop until one candidate clears size. Do not spend
   GPU on `#1790` comparison before `#1812` has either cleared size or been
   rejected as too brittle.
+
+## 2026-04-28 `#1812` Size Sweep On 1xH100
+
+This batch used the Runpod direct TCP endpoint
+`root@64.247.201.48 -p 10355` on a fresh `1xH100 80GB` pod. The scratch repo
+was recreated under `/workspace/research/parameter-golf-pr1812`; the local
+result archive is:
+
+- `results/pr1812_apr28_size_sweep/`
+
+Setup:
+
+- installed missing `brotli`
+- fetched `openai/parameter-golf#1812`
+- downloaded official SP8192 data from `kevclark/parameter-golf` with
+  `--train-shards 3`
+- recreated the 2M validation proxy with `2,097,153` stored tokens and
+  `2,097,152` scored tokens
+- applied the scratch Brotli patch with
+  `scripts/research/patch_packed_record.py`
+
+### Lossless Brotli Patch
+
+Run:
+`pr1812_signal_300_val2m_3shards_chunk32k_lgwin24`
+
+Changes versus the previous 32K parent:
+
+- `_compress`: `brotli.compress(data, quality=11, lgwin=24)`
+- `TTT_CHUNK_TOKENS=32768`
+- `GPTQ_CALIBRATION_BATCHES=64`
+
+Measured result:
+
+- Step-300 BPB: `1.3536`
+- Pre-quant post-EMA BPB: `2.05681026`
+- Quantized BPB: `2.06268783`
+- Quantized sliding BPB: `2.05853852`
+- Quantized TTT BPB: `1.67087793`
+- TTT eval time: `98.508s`
+- Quantized model bytes: `16,001,590`
+
+Interpretation:
+
+- `lgwin=24` improved size from the previous `16,003,606` bytes to
+  `16,001,590` bytes.
+- It is still over the decimal 16 MB model-only cap by `1,590` bytes, so it is
+  not submission-ready.
+- Quality stayed close to the previous 32K parent:
+  `1.66858393` -> `1.67087793`.
+
+### Failed Size Knobs
+
+All of these kept the Brotli `lgwin=24` patch and the same 32K parent.
+
+| Run | Change | Model bytes | Status |
+| --- | --- | ---: | --- |
+| `pr1812_signal_300_val2m_3shards_chunk32k_lgwin24_mclip125` | `MATRIX_CLIP_SIGMAS=12.5` | `16,159,106` | rejected; size regressed badly |
+| `pr1812_signal_300_val2m_3shards_chunk32k_lgwin24_eclip18` | `EMBED_CLIP_SIGMAS=18.0` | `16,088,541` | rejected; size regressed badly |
+| `pr1812_signal_300_val2m_3shards_chunk32k_lgwin24_gptq32` | `GPTQ_CALIBRATION_BATCHES=32` | `16,001,915` | rejected; worse than `lgwin=24` |
+
+The matrix and embedding clipping runs were stopped after artifact export and
+standard quantized eval because they were already far over cap. The `gptq32`
+run was also stopped before TTT because it did not improve size.
+
+### Targeted Lowbit Probes
+
+Because the low-risk knobs did not clear the cap, the next step was targeted
+`LOWBIT_LAYERS`, restricted to the last block's attention weights. Quant-only
+probes reused the trained checkpoint to avoid burning full 300-step runs before
+knowing the size effect.
+
+| Probe | `LOWBIT_LAYERS` | Model bytes | Eval |
+| --- | --- | ---: | --- |
+| `pr1812_quantonly_lgwin24_lowbit_attn10` | `blocks.10.attn:5` | `15,908,882` | TTT BPB `1.67477649` from eval-only |
+| `pr1812_quantonly_lgwin24_lowbit_attn10_kv` | `blocks.10.attn.c_k.weight:5,blocks.10.attn.c_v.weight:5` | `15,973,922` | TTT BPB `1.67534161` from eval-only |
+| `pr1812_quantonly_lgwin24_lowbit_attn10_kvq` | `blocks.10.attn.c_k.weight:5,blocks.10.attn.c_v.weight:5,blocks.10.attn.c_q.weight:5` | `15,941,937` | size-only |
+| `pr1812_quantonly_lgwin24_lowbit_attn10_qproj` | `blocks.10.attn.c_q.weight:5,blocks.10.attn.proj.weight:5` | `15,941,206` | size-only |
+
+Interpretation:
+
+- The full last-block attention lowbit pattern clears size but is broader than
+  necessary.
+- The `c_k+c_v` pattern is the narrowest tested lowbit change that still gives
+  model-size margin. It should be preferred over the broader
+  `blocks.10.attn:5` pattern unless the packed-code total check proves the
+  margin is too small.
+
+### Current Best Reduced Candidate
+
+Canonical full 300-step run:
+`pr1812_signal_300_val2m_3shards_chunk32k_lgwin24_lowbit_attn10_kv`
+
+Config deltas from `#1812`:
+
+- scratch Brotli patch: `brotli.compress(data, quality=11, lgwin=24)`
+- `TTT_CHUNK_TOKENS=32768`
+- `LOWBIT_LAYERS=blocks.10.attn.c_k.weight:5,blocks.10.attn.c_v.weight:5`
+- `GPTQ_CALIBRATION_BATCHES=64`
+
+Measured result:
+
+- Step-300 BPB: `1.3534`
+- Pre-quant post-EMA BPB: `2.06239244`
+- Quantized BPB: `2.06862475`
+- Quantized sliding BPB: `2.06457833`
+- Quantized TTT BPB: `1.67514738`
+- TTT eval time: `77.638s`
+- Quantized model bytes: `15,971,425`
+- Raw packed `train_gpt.py` bytes: `19,645`
+- Raw script plus model bytes: `15,991,070`
+- Conservative total margin versus decimal 16 MB: `8,930` bytes
+
+Interpretation:
+
+- This is the first `#1812` reduced-loop candidate that both clears size and
+  completes legal score-first TTT.
+- The quality cost versus the over-cap `lgwin=24` parent is
+  `1.67087793` -> `1.67514738`, a regression of `0.00426945` BPB.
+- The quality cost versus the original over-cap 32K parent is
+  `1.66858393` -> `1.67514738`, a regression of `0.00656345` BPB.
+- The model-only size margin is `28,575` bytes below decimal 16 MB. Using the
+  raw packed script size, the conservative script-plus-model margin is still
+  `8,930` bytes.
+- The record references `pack_submission.py` only inside its smoke-test path,
+  but that helper was not present in the `#1812` scratch checkout. The raw
+  script-plus-model total above is therefore the conservative size check for
+  this batch.
+
+### Next Action
+
+Do not spend more GPU on clipping or calibration-size probes. The useful next
+steps are:
+
+1. Package a minimal record-style submission candidate
+   from the `#1812` folder with only the Brotli patch, 32K TTT chunk, and
+   `LOWBIT_LAYERS` change.
+2. If a stricter official artifact check rejects the raw-total margin, test
+   exactly one more narrow lowbit escalation: add
+   `blocks.10.attn.c_q.weight:5` (`c_k+c_v+c_q`) because the quant-only
+   artifact was `15,941,937` bytes.
