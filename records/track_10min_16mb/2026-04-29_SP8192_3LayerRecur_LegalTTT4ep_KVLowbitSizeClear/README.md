@@ -1,6 +1,6 @@
 # SP8192 3-Layer Recurrence + Legal TTT 4ep + KV Lowbit Size Clear
 
-**val_bpb = 1.07585987** on seed 42 only | 15,961,508 raw script+model bytes | 8xH100
+**val_bpb = 1.07703706** two-seed mean | max 15,966,796 raw script+model bytes | 8xH100
 
 This is a size-clearing fallback submission candidate built from
 [`#1812`](https://github.com/openai/parameter-golf/pull/1812). It is not claimed
@@ -12,10 +12,10 @@ margin by quantizing only the final block's attention K/V matrices to int5.
 | Seed | Pre-quant BPB | Quantized BPB | Sliding BPB | TTT BPB | Model B | Raw script+model B | Train | Eval |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 42 | 1.08297128 | 1.09380490 | 1.07717917 | **1.07585987** | 15,941,863 | 15,961,508 | 600.015s | 446.947s |
+| 314 | 1.08523927 | 1.09613404 | 1.07958639 | **1.07821424** | 15,947,151 | 15,966,796 | 600.040s | 436.932s |
 
-Seed 314 was started during validation, but the Runpod direct TCP endpoint
-dropped during post-training quantization and the result was not copied back.
-This PR intentionally reports only the completed seed 42 run.
+The reported score is the mean over the two completed full 8xH100 seeds. This
+is still a fallback candidate, not a SOTA claim.
 
 ## Changes From `#1812`
 
@@ -36,8 +36,8 @@ pip install flash_attn_3 --no-deps \
 MATCHED_FINEWEB_REPO_ID=kevclark/parameter-golf \
   python3 data/cached_challenge_fineweb.py --variant sp8192
 
-RUN_ID=pr1812_full8_seed42_lgwin24_lowbit_attn10_kv \
-SEED=42 \
+RUN_ID=pr1812_full8_seed314_lgwin24_lowbit_attn10_kv \
+SEED=314 \
 MATCHED_FINEWEB_REPO_ID=kevclark/parameter-golf \
 TOKENIZER_PATH=./data/tokenizers/fineweb_8192_bpe.model \
 TRAIN_FILES=./data/datasets/fineweb10B_sp8192/fineweb_train_*.bin \
@@ -60,7 +60,7 @@ torchrun --standalone --nproc_per_node=8 train_gpt.py
 - Full normalized softmax distribution; no n-gram cache, ETLB, or SLOT.
 - No pre-quant validation TTT.
 - Model artifact is below 16,000,000 bytes.
-- Raw packed script plus model is below 16,000,000 bytes for the recorded seed.
+- Raw packed script plus model is below 16,000,000 bytes for both recorded seeds.
 
 ## Included Files
 
@@ -68,4 +68,6 @@ torchrun --standalone --nproc_per_node=8 train_gpt.py
 - `submission.json`
 - `train_gpt.py`
 - `seed42.log`
+- `seed314.log`
 - `command_seed42.txt`
+- `command_seed314.txt`
